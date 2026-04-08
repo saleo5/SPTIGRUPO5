@@ -1,11 +1,11 @@
 // src/utils.js - Utilidades con vulnerabilidades
 const crypto = require('crypto');
 
-// VULNERABILIDAD: Secrets hardcoded
-const SLACK_WEBHOOK = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXX";
-const STRIPE_KEY = "sk_live_4eC39HqLyjWDarhtT657A7Q2";
-const AWS_SECRET = "aws_secret_access_key_1234567890abcdefghijklmnop";
-const DB_URL = "postgresql://admin:password123@localhost:5432/mydb";
+// Secrets cargados desde variables de entorno
+const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK;
+const STRIPE_KEY = process.env.STRIPE_KEY;
+const AWS_SECRET = process.env.AWS_SECRET;
+const DB_URL = process.env.DB_URL;
 
 // VULNERABILIDAD: Weak encryption
 function encryptPassword(password) {
