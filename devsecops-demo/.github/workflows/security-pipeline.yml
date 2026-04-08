@@ -1,0 +1,201 @@
+name: DevSecOps Security Pipeline
+
+# Trigger automático en push y pull requests
+on:
+  push:
+    branches: [ main, develop, 'feature/**' ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch: # Permite ejecución manual
+
+jobs:
+  security-analysis:
+    runs-on: ubuntu-latest
+    name: Análisis de Seguridad
+
+    steps:
+      # 1. Checkout del código
+      - name: Checkout código
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # 2. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      # 3. Instalar dependencias
+      - name: Instalar dependencias
+        run: npm ci
+
+      # 4. SAST - Análisis de código fuente (Semgrep)
+      - name: SAST - Semgrep Analysis
+        id: semgrep
+        run: |
+          semgrep scan --sarif --output semgrep.sarif --config p/security-audit --config p/owasp-top-ten src/
+        continue-on-error: true
+
+      # 5. Upload SAST results
+      - name: Upload SAST results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: semgrep.sarif
+        continue-on-error: true
+
+      # 6. SCA - Análisis de dependencias (npm audit)
+      - name: SCA - npm audit
+        id: npm_audit
+        run: npm audit --production --json > audit-report.json || true
+        continue-on-error: true
+
+      # 7. Parse y mostrar resultados npm audit
+      - name: Mostrar resultados npm audit
+        id: audit_results
+        run: |
+          echo "=== NPM Audit Report ===" 
+          cat audit-report.json | jq '.metadata'
+          vulnerabilities=$(cat audit-report.json | jq '.metadata.vulnerabilities.total')
+          echo "vulnerabilities=$vulnerabilities" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      # 8. Crear comentario con resultados
+      - name: Comentar en PR con resultados
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const auditData = JSON.parse(fs.readFileSync('audit-report.json', 'utf8'));
+            const vulnerabilities = auditData.metadata.vulnerabilities.total || 0;
+            
+            let comment = `## Security Analysis Report\n\n`;
+            comment += `### Vulnerabilidades Encontradas: **${vulnerabilities}**\n\n`;
+            
+            if (vulnerabilities > 0) {
+              comment += `Se encontraron vulnerabilidades. Por favor revisar y remediar.\n`;
+              comment += `\n**Detalles:**\n`;
+              comment += `\`\`\`json\n`;
+              comment += JSON.stringify(auditData.vulnerabilities || {}, null, 2).substring(0, 500);
+              comment += `\n\`\`\``;
+            } else {
+              comment += `No se encontraron vulnerabilidades conocidas.`;
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+        continue-on-error: true
+
+      # 9. Generar reporte
+      - name: Generar reporte consolidado
+        run: |
+          echo "# Security Scan Report" > security-report.md
+          echo "" >> security-report.md
+          echo "**Timestamp:** $(date)" >> security-report.md
+          echo "**Commit:** ${{ github.sha }}" >> security-report.md
+          echo "" >> security-report.md
+          echo "## SAST (Semgrep)" >> security-report.md
+          echo "\`\`\`" >> security-report.md
+          cat semgrep.sarif | jq '.runs[0].results | length' >> security-report.md || echo "N/A" >> security-report.md
+          echo "\`\`\`" >> security-report.md
+          echo "" >> security-report.md
+          echo "## SCA (npm audit)" >> security-report.md
+          echo "\`\`\`" >> security-report.md
+          cat audit-report.json | jq '.metadata.vulnerabilities' >> security-report.md
+          echo "\`\`\`" >> security-report.md
+
+      # 10. Artifact con reportes
+      - name: Guardar reportes
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: |
+            audit-report.json
+            security-report.md
+            semgrep.sarif
+          retention-days: 30
+
+      # 11. Summary
+      - name: Crear Job Summary
+        if: always()
+        run: |
+          echo "# DevSecOps Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Análisis Completado" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "SAST: Ejecutado (Semgrep)" >> $GITHUB_STEP_SUMMARY
+          echo "SCA: Ejecutado (npm audit)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Vulnerabilidades encontradas:" >> $GITHUB_STEP_SUMMARY
+          cat audit-report.json | jq '.metadata.vulnerabilities' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📝 Los reportes están disponibles en Artifacts" >> $GITHUB_STEP_SUMMARY
+
+  # Trabajo adicional: Generar PR con fixes (OPCIONAL - se dispara si hay vulns)
+  remediation:
+    runs-on: ubuntu-latest
+    name: Auto-Remediation
+    needs: security-analysis
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
+    
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: "Auto-remediate: Update dependencies"
+        id: remediate
+        run: |
+          echo "Ejecutando remediation..."
+          npm audit fix --force --json > remediation-result.json || true
+          
+          # Verificar si hubo cambios
+          if git diff --quiet package-lock.json; then
+            echo "remediated=false" >> $GITHUB_OUTPUT
+          else
+            echo "remediated=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Crear PR con fixes
+        if: ${{ steps.remediate.outputs.remediated == 'true' }}
+        uses: peter-evans/create-pull-request@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: Auto-remediate security vulnerabilities'
+          title: '[AUTO] Security: Auto-fix vulnerabilities'
+          body: |
+            ## Security Auto-Remediation
+            
+            Este PR fue generado automáticamente por la pipeline de seguridad.
+            
+            **Cambios:**
+            - Dependencias actualizadas a versiones seguras
+            - Vulnerabilidades de SCA corregidas
+            
+            **Próximos pasos:**
+            1. Revisar cambios en `package-lock.json`
+            2. Validar que la aplicación sigue funcionando
+            3. Ejecutar tests adicionales
+            4. Mergear cuando esté listo
+            
+            ---
+            *Este PR fue creado automáticamente por la pipeline DevSecOps*
+          branch: auto/security-remediation-${{ github.run_id }}
+          delete-branch: true
+        continue-on-error: true
