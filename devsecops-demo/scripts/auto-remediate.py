@@ -39,19 +39,19 @@ def get_repo_info():
     """Obtiene información del repositorio"""
     # Obtener origen remoto
     returncode, stdout, _ = run_command("git config --get remote.origin.url")
-    
+
     if returncode != 0:
         print("No estamos en un repositorio git")
         sys.exit(1)
-    
+
     repo_url = stdout.strip()
-    
+
     # Parse owner/repo
     if "github.com" in repo_url:
         parts = repo_url.split("/")
         owner = parts[-2]
         repo = parts[-1].replace(".git", "")
-        return owner, repo, token
+        return owner, repo
     else:
         print("No es un repositorio de GitHub")
         sys.exit(1)
@@ -147,7 +147,7 @@ def main():
     print_banner()
     
     token = get_github_token()
-    owner, repo, token = get_repo_info()
+    owner, repo = get_repo_info()
     
     print(f"Repository: {owner}/{repo}")
     print(f"Token: {token[:10]}...")
