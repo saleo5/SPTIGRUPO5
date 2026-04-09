@@ -1,0 +1,27 @@
+{
+  "name": "devsecops-demo",
+  "version": "1.0.0",
+  "description": "Demo de DevSecOps con vulnerabilidades intencionales para análisis SAST/SCA",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "audit": "npm audit --production",
+    "audit:json": "npm audit --production --json",
+    "sast": "bash scripts/run-sast.sh",
+    "sca": "bash scripts/run-sca.sh"
+  },
+  "dependencies": {
+    "express": "4.17.1",
+    "sqlite3": "5.0.2"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  },
+  "keywords": ["devsecops", "security", "demo", "sast", "sca"],
+  "author": "SPTIGRUPO5",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

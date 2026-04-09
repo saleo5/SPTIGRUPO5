@@ -19,7 +19,6 @@ yarn-error.log*
 
 # Artifacts y reportes temporales
 /tmp/
-*.json
 audit-report.json
 semgrep.sarif
 security-report.md
