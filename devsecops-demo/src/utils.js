@@ -1,4 +1,4 @@
-// src/utils.js - Utilidades con vulnerabilidades
+// src/utils.js - Utilidades (versión segura - vulnerabilidades remediadas)
 const crypto = require('crypto');
 
 // Secrets cargados desde variables de entorno
@@ -7,37 +7,42 @@ const STRIPE_KEY = process.env.STRIPE_KEY;
 const AWS_SECRET = process.env.AWS_SECRET;
 const DB_URL = process.env.DB_URL;
 
-// VULNERABILIDAD: Weak encryption
+// FIX #1: AES-256-GCM reemplaza DES — cifrado moderno y autenticado
 function encryptPassword(password) {
-  const cipher = crypto.createCipher('des', 'weak-key'); // DES es débil
+  const key = crypto.scryptSync(process.env.ENCRYPTION_KEY || 'changeme-set-env', 'salt', 32);
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   let encrypted = cipher.update(password, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  return encrypted;
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
 }
 
-// VULNERABILIDAD: Insecure random
+// FIX #2: crypto.randomBytes() — criptográficamente seguro
 function generateToken() {
-  return Math.random().toString(36).substring(2, 15); // No es criptográficamente seguro
+  return crypto.randomBytes(32).toString('hex');
 }
 
-// VULNERABILIDAD: Eval (NUNCA hacer esto)
-function executeUserCode(code) {
-  return eval(code); // PELIGROSO: Code injection
+// FIX #3: eval() eliminado — ejecución dinámica de código no permitida
+function executeUserCode(_code) {
+  throw new Error('Dynamic code execution is not allowed');
 }
 
-// VULNERABILIDAD: No validación de entrada
+// FIX #4: Validación y sanitización de entrada — retorna valor limpio para prepared statement
 function processUserInput(input) {
-  const result = `SELECT * FROM users WHERE name LIKE '%${input}%'`;
-  return result;
+  if (typeof input !== 'string' || input.length > 255) {
+    throw new Error('Invalid input');
+  }
+  // Retornar el valor sanitizado para usar con '?' en prepared statement, nunca interpolar en query
+  return input.replace(/[^a-zA-Z0-9 _\-]/g, '');
 }
 
-// VULNERABILIDAD: Credentials en error messages
-function authenticate(username, password) {
+// FIX #5: Solo loguear username en errores, nunca la contraseña
+function authenticate(username, _password) {
   try {
-    // Lógica de auth
     return { authenticated: true };
   } catch (error) {
-    console.error(`Failed login for user ${username} with password ${password}`);
+    console.error(`Failed login attempt for user: ${username}`);
     throw error;
   }
 }

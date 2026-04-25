@@ -12,9 +12,12 @@ defaults:
     working-directory: devsecops-demo
 
 jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: SAST + SCA + Security Gate
+  # ─────────────────────────────────────────────
   security-analysis:
     runs-on: ubuntu-latest
-    name: Análisis de Seguridad
+    name: SAST + SCA + Security Gate
 
     steps:
       - name: Checkout código
@@ -40,10 +43,16 @@ jobs:
       - name: Instalar Semgrep
         run: pip install semgrep
 
+      # ── SAST ──────────────────────────────────
       - name: SAST - Semgrep Analysis
         id: semgrep
         run: |
-          semgrep scan --sarif --output semgrep.sarif --config p/security-audit --config p/owasp-top-ten src/ || true
+          semgrep scan \
+            --sarif \
+            --output semgrep.sarif \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            src/ || true
         continue-on-error: true
 
       - name: Upload SAST results to GitHub Security
@@ -53,19 +62,56 @@ jobs:
           sarif_file: devsecops-demo/semgrep.sarif
         continue-on-error: true
 
+      # ── SCA ───────────────────────────────────
       - name: SCA - npm audit
         id: npm_audit
         run: npm audit --production --json > audit-report.json || true
+
+      - name: SCA - npm outdated
+        run: |
+          npm outdated --json > outdated-report.json || true
+          echo "=== Dependencias desactualizadas ==="
+          cat outdated-report.json | jq 'to_entries[] | "\(.key): \(.value.current) → \(.value.latest)"' 2>/dev/null || echo "Todas las dependencias están al día"
 
       - name: Mostrar resultados npm audit
         id: audit_results
         run: |
           echo "=== NPM Audit Report ==="
-          cat audit-report.json | jq '.metadata'
-          vulnerabilities=$(cat audit-report.json | jq '.metadata.vulnerabilities.total // 0')
-          echo "vulnerabilities=$vulnerabilities" >> $GITHUB_OUTPUT
+          cat audit-report.json | jq '.metadata.vulnerabilities' || true
+          CRITICAL=$(cat audit-report.json | jq '.metadata.vulnerabilities.critical // 0')
+          HIGH=$(cat audit-report.json    | jq '.metadata.vulnerabilities.high     // 0')
+          TOTAL=$(cat audit-report.json   | jq '.metadata.vulnerabilities.total    // 0')
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH"         >> $GITHUB_OUTPUT
+          echo "total=$TOTAL"       >> $GITHUB_OUTPUT
         continue-on-error: true
 
+      # ── SECURITY GATE (bloqueo de merge) ──────
+      - name: Security Gate - Bloquear si hay vulnerabilidades críticas
+        run: |
+          CRITICAL_SCA=$(cat audit-report.json | jq '.metadata.vulnerabilities.critical // 0' 2>/dev/null || echo 0)
+          CRITICAL_SAST=$(cat semgrep.sarif | jq '[.runs[0].results[] | select(.level == "error")] | length' 2>/dev/null || echo 0)
+
+          echo "──────────────────────────────────────"
+          echo "  SECURITY GATE RESULTS"
+          echo "──────────────────────────────────────"
+          echo "  Críticas SAST (Semgrep) : $CRITICAL_SAST"
+          echo "  Críticas SCA  (npm)     : $CRITICAL_SCA"
+          echo "──────────────────────────────────────"
+
+          TOTAL_CRITICAL=$((CRITICAL_SCA + CRITICAL_SAST))
+
+          if [ "$TOTAL_CRITICAL" -gt "0" ]; then
+            echo ""
+            echo "❌ SECURITY GATE: FAILED"
+            echo "   Se encontraron $TOTAL_CRITICAL vulnerabilidades críticas."
+            echo "   El merge no puede proceder hasta que sean remediadas."
+            exit 1
+          fi
+
+          echo "✅ SECURITY GATE: PASSED — ninguna vulnerabilidad crítica detectada."
+
+      # ── COMENTARIO EN PR ──────────────────────
       - name: Comentar en PR con resultados
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -73,17 +119,29 @@ jobs:
           script: |
             const fs = require('fs');
             const auditData = JSON.parse(fs.readFileSync('devsecops-demo/audit-report.json', 'utf8'));
-            const vulnerabilities = auditData.metadata?.vulnerabilities?.total || 0;
-            let comment = `## Security Analysis Report\n\n`;
-            comment += `### Vulnerabilidades Encontradas: **${vulnerabilities}**\n\n`;
-            if (vulnerabilities > 0) {
-              comment += `Se encontraron vulnerabilidades. Por favor revisar y remediar.\n`;
-              comment += `\n**Detalles:**\n\`\`\`json\n`;
-              comment += JSON.stringify(auditData.vulnerabilities || {}, null, 2).substring(0, 500);
-              comment += `\n\`\`\``;
+            const vulns = auditData.metadata?.vulnerabilities || {};
+            const total = vulns.total || 0;
+            const critical = vulns.critical || 0;
+            const high = vulns.high || 0;
+            const moderate = vulns.moderate || 0;
+
+            const statusIcon = critical > 0 ? '❌' : high > 0 ? '⚠️' : '✅';
+
+            let comment = `## ${statusIcon} Security Analysis Report\n\n`;
+            comment += `| Severidad | Cantidad |\n|-----------|----------|\n`;
+            comment += `| 🔴 Crítica  | ${critical} |\n`;
+            comment += `| 🟠 Alta     | ${high}     |\n`;
+            comment += `| 🟡 Media    | ${moderate} |\n`;
+            comment += `| **Total**  | **${total}** |\n\n`;
+
+            if (critical > 0) {
+              comment += `> ❌ **Security Gate BLOQUEADO**: existen ${critical} vulnerabilidades críticas. Remediar antes de mergear.\n`;
+            } else if (total > 0) {
+              comment += `> ⚠️ Se encontraron vulnerabilidades no críticas. Revisar antes de mergear.\n`;
             } else {
-              comment += `No se encontraron vulnerabilidades conocidas.`;
+              comment += `> ✅ No se encontraron vulnerabilidades conocidas en dependencias.\n`;
             }
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -92,30 +150,32 @@ jobs:
             });
         continue-on-error: true
 
+      # ── REPORTES ──────────────────────────────
       - name: Generar reporte consolidado
+        if: always()
         run: |
-          echo "# Security Scan Report" > security-report.md
-          echo "" >> security-report.md
-          echo "**Timestamp:** $(date)" >> security-report.md
-          echo "**Commit:** ${{ github.sha }}" >> security-report.md
-          echo "" >> security-report.md
-          echo "## SAST (Semgrep)" >> security-report.md
-          echo '```' >> security-report.md
-          cat semgrep.sarif | jq '.runs[0].results | length' >> security-report.md 2>/dev/null || echo "N/A" >> security-report.md
-          echo '```' >> security-report.md
-          echo "" >> security-report.md
-          echo "## SCA (npm audit)" >> security-report.md
-          echo '```' >> security-report.md
-          cat audit-report.json | jq '.metadata.vulnerabilities' >> security-report.md
-          echo '```' >> security-report.md
+          echo "# Security Scan Report"                           > security-report.md
+          echo ""                                                 >> security-report.md
+          echo "**Timestamp:** $(date)"                          >> security-report.md
+          echo "**Commit:** ${{ github.sha }}"                   >> security-report.md
+          echo ""                                                 >> security-report.md
+          echo "## SAST (Semgrep)"                               >> security-report.md
+          echo "Hallazgos totales: $(cat semgrep.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 'N/A')" >> security-report.md
+          echo ""                                                 >> security-report.md
+          echo "## SCA (npm audit)"                              >> security-report.md
+          cat audit-report.json | jq '.metadata.vulnerabilities' >> security-report.md 2>/dev/null || echo "N/A" >> security-report.md
+          echo ""                                                 >> security-report.md
+          echo "## Dependencias desactualizadas"                 >> security-report.md
+          cat outdated-report.json | jq 'keys[]' 2>/dev/null     >> security-report.md || echo "Ninguna" >> security-report.md
 
-      - name: Guardar reportes
+      - name: Guardar reportes como artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: security-reports
           path: |
             devsecops-demo/audit-report.json
+            devsecops-demo/outdated-report.json
             devsecops-demo/security-report.md
             devsecops-demo/semgrep.sarif
           retention-days: 30
@@ -123,15 +183,93 @@ jobs:
       - name: Crear Job Summary
         if: always()
         run: |
-          echo "# DevSecOps Pipeline Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Análisis Completado" >> $GITHUB_STEP_SUMMARY
-          echo "- SAST: Ejecutado (Semgrep)" >> $GITHUB_STEP_SUMMARY
-          echo "- SCA: Ejecutado (npm audit)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Vulnerabilidades encontradas:" >> $GITHUB_STEP_SUMMARY
-          cat audit-report.json | jq '.metadata.vulnerabilities' >> $GITHUB_STEP_SUMMARY || echo "N/A" >> $GITHUB_STEP_SUMMARY
+          echo "# DevSecOps Pipeline Summary"                     >> $GITHUB_STEP_SUMMARY
+          echo ""                                                  >> $GITHUB_STEP_SUMMARY
+          echo "| Herramienta | Estado |"                        >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|--------|"                        >> $GITHUB_STEP_SUMMARY
+          echo "| Semgrep SAST | ✅ Ejecutado |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| npm audit SCA | ✅ Ejecutado |"                >> $GITHUB_STEP_SUMMARY
+          echo "| npm outdated  | ✅ Ejecutado |"                >> $GITHUB_STEP_SUMMARY
+          echo "| Security Gate | Ver resultado del step |"      >> $GITHUB_STEP_SUMMARY
+          echo ""                                                  >> $GITHUB_STEP_SUMMARY
+          echo "## Vulnerabilidades SCA"                         >> $GITHUB_STEP_SUMMARY
+          cat audit-report.json | jq '.metadata.vulnerabilities'  >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "N/A" >> $GITHUB_STEP_SUMMARY
 
+  # ─────────────────────────────────────────────
+  # JOB 2: DAST - OWASP ZAP
+  # ─────────────────────────────────────────────
+  dast:
+    runs-on: ubuntu-latest
+    name: DAST - OWASP ZAP
+    needs: security-analysis
+    # Solo correr en push (no bloquear PRs esperando el servidor)
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Instalar dependencias
+        working-directory: devsecops-demo
+        run: npm install
+
+      - name: Iniciar aplicación en background
+        working-directory: devsecops-demo
+        env:
+          PORT: 3000
+          NODE_ENV: test
+          API_KEY: test-key
+          JWT_SECRET: test-jwt-secret-for-dast-only
+          ENCRYPTION_KEY: test-encryption-key
+        run: |
+          node src/app.js &
+          # Esperar a que el servidor esté listo (máx 15 seg)
+          for i in $(seq 1 15); do
+            curl -s http://localhost:3000 > /dev/null 2>&1 && echo "Servidor listo" && break
+            echo "Esperando servidor... ($i)"
+            sleep 1
+          done
+
+      - name: DAST - OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:3000'
+          fail_action: false
+          allow_issue_writing: false
+          cmd_options: '-a -j'
+        continue-on-error: true
+
+      - name: Guardar reporte ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-report
+          path: report_json.json
+          retention-days: 30
+        continue-on-error: true
+
+      - name: Resumen DAST en Job Summary
+        if: always()
+        run: |
+          echo "# DAST - OWASP ZAP Baseline Scan"        >> $GITHUB_STEP_SUMMARY
+          echo ""                                          >> $GITHUB_STEP_SUMMARY
+          echo "Target: http://localhost:3000"            >> $GITHUB_STEP_SUMMARY
+          echo ""                                          >> $GITHUB_STEP_SUMMARY
+          if [ -f report_json.json ]; then
+            ALERTS=$(cat report_json.json | jq '.site[0].alerts | length' 2>/dev/null || echo "N/A")
+            echo "Alertas detectadas: **$ALERTS**"       >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Reporte ZAP no disponible"             >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ─────────────────────────────────────────────
+  # JOB 3: Auto-Remediation (solo en develop)
+  # ─────────────────────────────────────────────
   remediation:
     runs-on: ubuntu-latest
     name: Auto-Remediation
