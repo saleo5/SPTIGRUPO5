@@ -533,7 +533,7 @@
       <div class="dot-pulse"></div>
       Pipeline Activo
     </div>
-    <div class="run-info">Última ejecución: 25 Apr 2026, 14:32</div>
+    <div class="run-info" id="last-scan">Última ejecución: 25 Apr 2026, 14:32</div>
   </div>
 </header>
 
@@ -549,25 +549,25 @@
     <div class="card total">
       <div class="card-icon">🔍</div>
       <div class="card-label">Total Detectadas</div>
-      <div class="card-value">17</div>
-      <div class="card-sub">13 SAST · 4 SCA</div>
+      <div class="card-value" id="total-count">17</div>
+      <div class="card-sub" id="total-sub">13 SAST · 4 SCA</div>
     </div>
     <div class="card critical">
       <div class="card-icon">🔴</div>
       <div class="card-label">Críticas</div>
-      <div class="card-value">4</div>
+      <div class="card-value" id="critical-count">4</div>
       <div class="card-sub">Requieren corrección inmediata</div>
     </div>
     <div class="card high">
       <div class="card-icon">🟠</div>
       <div class="card-label">Altas</div>
-      <div class="card-value">7</div>
-      <div class="card-sub">5 SAST · 2 SCA</div>
+      <div class="card-value" id="high-count">7</div>
+      <div class="card-sub" id="high-sub">5 SAST · 2 SCA</div>
     </div>
     <div class="card medium">
       <div class="card-icon">🟡</div>
       <div class="card-label">Medias / Bajas</div>
-      <div class="card-value">6</div>
+      <div class="card-value" id="medium-count">6</div>
       <div class="card-sub">3 medias · 1 baja · 2 SCA</div>
     </div>
   </div>
@@ -641,7 +641,7 @@
 
   <div class="panel mb-28">
     <div class="panel-title">Análisis Estático de Código Fuente <span class="sub">— 13 hallazgos en src/</span></div>
-    <table class="vuln-table">
+    <table class="vuln-table" id="sast-table">
       <thead>
         <tr>
           <th>Severidad</th>
@@ -780,7 +780,7 @@
 
   <div class="panel mb-28">
     <div class="panel-title">Análisis de Composición de Software <span class="sub">— 4 dependencias vulnerables</span></div>
-    <table class="vuln-table">
+    <table class="vuln-table" id="sca-table">
       <thead>
         <tr>
           <th>Severidad</th>
@@ -1058,7 +1058,7 @@
 <script>
   // Severity Donut Chart
   const sevCtx = document.getElementById('severityChart').getContext('2d');
-  new Chart(sevCtx, {
+  let severityChart = new Chart(sevCtx, {
     type: 'doughnut',
     data: {
       labels: ['Crítica', 'Alta', 'Media', 'Baja'],
@@ -1161,6 +1161,94 @@
       }
     }
   });
+
+  // ── Carga datos reales del pipeline (data.json) ──────────────────────
+  async function loadLiveData() {
+    try {
+      const res = await fetch('data.json');
+      if (!res.ok) return;
+      const d = await res.json();
+
+      // Tarjetas de resumen
+      document.getElementById('total-count').textContent    = d.summary.total;
+      document.getElementById('critical-count').textContent = d.summary.critical;
+      document.getElementById('high-count').textContent     = d.summary.high;
+      document.getElementById('medium-count').textContent   = d.summary.medium + d.summary.low;
+      document.getElementById('total-sub').textContent      = `${d.sast.total} SAST · ${d.sca.total} SCA`;
+      document.getElementById('high-sub').textContent       = `${d.sast.high} SAST · ${d.sca.high} SCA`;
+
+      // Timestamp y commit
+      if (d.generated_at) {
+        const dt = new Date(d.generated_at);
+        document.getElementById('last-scan').textContent =
+          'Última ejecución: ' + dt.toLocaleString('es-CO', { timeZone: 'America/Bogota', dateStyle: 'medium', timeStyle: 'short' });
+      }
+
+      // Gráfico de severidad con datos reales
+      severityChart.data.datasets[0].data = [
+        d.summary.critical,
+        d.summary.high,
+        d.summary.medium,
+        d.summary.low
+      ];
+      severityChart.update();
+
+      // Badge de datos en vivo
+      const badge = document.querySelector('.pipeline-badge');
+      if (badge) {
+        badge.innerHTML = '<div class="dot-pulse"></div> Datos en vivo · commit ' + d.commit;
+      }
+
+      // Tabla SAST dinámica si hay hallazgos reales
+      if (d.sast && d.sast.findings && d.sast.findings.length > 0) {
+        const tbody = document.querySelector('#sast-table tbody');
+        if (tbody) {
+          tbody.innerHTML = '';
+          d.sast.findings.forEach(f => {
+            const sevClass = { critical: 'sev-critical', error: 'sev-critical', high: 'sev-high', warning: 'sev-high', medium: 'sev-medium', note: 'sev-medium', low: 'sev-low' }[f.severity] || 'sev-low';
+            const sevLabel = { critical: 'Critical', error: 'Critical', high: 'High', warning: 'High', medium: 'Medium', note: 'Medium', low: 'Low' }[f.severity] || 'Low';
+            tbody.innerHTML += `
+              <tr>
+                <td><span class="severity-badge ${sevClass}">● ${sevLabel}</span></td>
+                <td>
+                  <div class="vuln-title">${f.rule || 'Finding'}</div>
+                  <div class="vuln-desc">${f.message}</div>
+                </td>
+                <td><span class="code-loc">${f.file}:${f.line}</span></td>
+                <td>—</td>
+              </tr>`;
+          });
+        }
+      }
+
+      // Tabla SCA dinámica si hay hallazgos reales
+      if (d.sca && d.sca.findings && d.sca.findings.length > 0) {
+        const tbody = document.querySelector('#sca-table tbody');
+        if (tbody) {
+          tbody.innerHTML = '';
+          d.sca.findings.forEach(f => {
+            const sevClass = { critical: 'sev-critical', high: 'sev-high', moderate: 'sev-medium', medium: 'sev-medium', low: 'sev-low' }[f.severity] || 'sev-low';
+            const sevLabel = { critical: 'Critical', high: 'High', moderate: 'Medium', medium: 'Medium', low: 'Low' }[f.severity] || f.severity;
+            tbody.innerHTML += `
+              <tr>
+                <td><span class="severity-badge ${sevClass}">● ${sevLabel}</span></td>
+                <td><span class="code-loc">${f.package}</span></td>
+                <td>${f.version}</td>
+                <td>
+                  <div class="vuln-title">${f.title}</div>
+                </td>
+                <td>${f.recommendation ? '→ ' + f.recommendation : '—'}</td>
+              </tr>`;
+          });
+        }
+      }
+
+    } catch (_) {
+      // Sin data.json — se muestran los datos estáticos del HTML
+    }
+  }
+
+  loadLiveData();
 </script>
 
 </body>
